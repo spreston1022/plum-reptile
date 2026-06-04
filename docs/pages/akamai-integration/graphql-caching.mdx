@@ -1,0 +1,49 @@
+---
+title: GraphQL Caching — Filling Akamai's Gaps
+description: Interactive demo showing how Zuplo's GraphQL caching layer addresses the documented limitations of Akamai's built-in GraphQL caching.
+sidebar_label: GraphQL Caching Demo
+sidebar_icon: zap
+---
+
+import { GraphQLCacheDemo } from "../../src/GraphQLCacheDemo";
+
+# GraphQL Caching — Filling Akamai's Gaps
+
+[Akamai's GraphQL caching](https://techdocs.akamai.com/property-mgr/docs/graphql-caching#graphql-caching-limits) has several documented limitations that reduce its effectiveness for real-world APIs. Zuplo runs a custom caching layer — implemented as a fully programmable inbound policy — that addresses each of them.
+
+## What Akamai Can't Do
+
+| Limitation | Akamai | Zuplo |
+|---|---|---|
+| **Query size** | Queries > 4,096 bytes bypass caching entirely | No size limit — full AST parsing at any size |
+| **Query normalization** | Caches the raw string — whitespace differences = different keys | `parse()` + `print()` normalizes before hashing |
+| **Fragment handling** | Not documented — different fragment whitespace = different keys | Fragment spreads normalized through the same AST round-trip |
+| **Variable key order** | JSON key ordering affects cache keys — `{a,b}` ≠ `{b,a}` | Recursive key sort before hashing |
+| **Nesting depth** | Default max 20 levels (configurable to 100) | No depth limit |
+| **Mutation passthrough** | ✓ Supported | ✓ Supported — mutations pass through uncached |
+| **Works on all deployments** | Only on Akamai's CDN | Works on Managed Edge, Managed Dedicated, and Self-Hosted |
+
+## Live Demo
+
+Each test below makes two requests to the Zuplo gateway. Click **▶ Run Test** to see real cache behavior — response times and `x-cache` headers come directly from the gateway.
+
+:::tip
+
+The cache TTL is 60 seconds. If request 1 shows **HIT**, the cache is still warm from a previous run — wait 60 seconds and try again to see the full MISS → HIT cycle.
+
+:::
+
+<GraphQLCacheDemo />
+
+## How It Works
+
+The caching layer is a single TypeScript module ([`graphql-cache-policy.ts`](https://github.com/spreston1022/plum-reptile/blob/main/modules/graphql-cache-policy.ts)) that runs as an inbound policy on every GraphQL route:
+
+1. **Parse** the incoming query using the `graphql` npm package — no size limits apply
+2. **Gate on operation type** — mutations and subscriptions pass through uncached
+3. **Normalize** via `parse()` → `print()` — this canonicalizes whitespace, field ordering, and fragment spreads
+4. **Canonicalize variables** — recursively sort object keys so `{b,a}` and `{a,b}` produce the same hash
+5. **Hash** the normalized query + canonical variables with SHA-256 via the Web Crypto API
+6. **Cache lookup** — return a cached response immediately on HIT, or register a hook to store the origin response on MISS
+
+The policy runs on Zuplo's runtime, which means it works identically across all three deployment models (Managed Edge on Cloudflare, Managed Dedicated on any cloud, and Self-Hosted Kubernetes) without any code changes.

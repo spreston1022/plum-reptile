@@ -41,6 +41,17 @@ const config: ZudokuConfig = {
         },
         {
           type: "category",
+          label: "Akamai Integration",
+          icon: "layers",
+          items: [
+            {
+              type: "doc",
+              file: "akamai-integration/graphql-caching",
+            },
+          ],
+        },
+        {
+          type: "category",
           label: "Useful Links",
           collapsible: false,
           icon: "link",

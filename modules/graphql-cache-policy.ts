@@ -83,6 +83,7 @@ export default async function graphqlCachePolicy(
     const headers = new Headers(hit.headers);
     headers.set("x-cache", "HIT");
     headers.set("x-cache-key", key.slice(0, 8));
+    headers.set("access-control-expose-headers", "x-cache, x-cache-key");
     context.log.info(`graphql-cache HIT key=${key.slice(0, 8)}`);
     return new Response(hit.body, { status: hit.status, headers });
   }
@@ -108,6 +109,7 @@ export default async function graphqlCachePolicy(
     const newHeaders = new Headers(response.headers);
     newHeaders.set("x-cache", "MISS");
     newHeaders.set("x-cache-key", key.slice(0, 8));
+    newHeaders.set("access-control-expose-headers", "x-cache, x-cache-key");
     context.log.info(`graphql-cache MISS key=${key.slice(0, 8)}`);
     return new Response(responseBody, { status: response.status, headers: newHeaders });
   });
