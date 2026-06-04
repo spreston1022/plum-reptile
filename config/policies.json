@@ -1,3 +1,12 @@
 {
-  "policies": []
+  "policies": [
+    {
+      "name": "graphql-cache-inbound",
+      "policyType": "custom",
+      "handler": {
+        "export": "default",
+        "module": "$import(./modules/graphql-cache-policy)"
+      }
+    }
+  ]
 }

@@ -5,6 +5,26 @@
     "title": "My Zuplo API"
   },
   "paths": {
+    "/graphql-mock": {
+      "x-zuplo-path": {
+        "pathMode": "open-api"
+      },
+      "post": {
+        "summary": "Mock GraphQL — recursive Node type for nesting depth tests",
+        "x-zuplo-route": {
+          "corsPolicy": "none",
+          "handler": {
+            "export": "default",
+            "module": "$import(./modules/graphql-mock-handler)"
+          },
+          "policies": {
+            "inbound": ["graphql-cache-inbound"]
+          }
+        },
+        "operationId": "graphql-mock",
+        "x-graphql": true
+      }
+    },
     "/graphql": {
       "x-zuplo-path": {
         "pathMode": "open-api"
@@ -22,7 +42,7 @@
             }
           },
           "policies": {
-            "inbound": []
+            "inbound": ["graphql-cache-inbound"]
           }
         },
         "operationId": "graphql-6c3fe6a4",
