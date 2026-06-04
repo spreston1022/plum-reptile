@@ -1,16 +1,13 @@
 /**
  * Nesting depth + latency tests against the /graphql-mock endpoint.
  *
- * The mock backend uses a recursive Node type with no server-side depth limit,
- * so we can push nesting as deep as we like and observe cache behavior.
- *
- * The `delay` argument on the `node` query makes the handler sleep before
- * responding, simulating a slow origin. Cache HITs are served by the policy
- * before the request reaches the handler, so they are unaffected by the delay.
+ * The mock backend always sleeps 1 second before responding, simulating a
+ * slow origin. Cache HITs are served by the inbound policy before the request
+ * reaches the handler, so they pay zero origin cost.
  *
  * Akamai's default: 20 levels. Configurable max: 100 levels.
- * Queries that exceed these limits have GraphQL analysis skipped entirely —
- * Akamai treats them as plain POST requests with no caching.
+ * Queries exceeding those limits have GraphQL analysis skipped — Akamai
+ * treats them as plain POST requests and does not cache them.
  *
  * Our implementation: no depth limit. Any valid GraphQL query is parsed,
  * normalized, and cached regardless of nesting depth.
@@ -24,8 +21,7 @@ import { describe, it, TestHelper } from "@zuplo/test";
 import { expect } from "chai";
 
 const ENDPOINT = `${TestHelper.TEST_URL}/graphql-mock`;
-
-const SIMULATED_DELAY_MS = 1000;
+const ORIGIN_DELAY_MS = 1000; // must match ORIGIN_DELAY_MS in graphql-mock-handler.ts
 
 async function gql(query: string, variables?: Record<string, unknown>) {
   return fetch(ENDPOINT, {
@@ -45,20 +41,16 @@ async function timedGql(query: string, variables?: Record<string, unknown>) {
 /**
  * Build a query that nests `child` selections `depth` times inside `node`.
  *
- * depth=1  → node { child { id name level } }
- * depth=25 → node { child { child { ... (25 levels) ... { id name level } } } }
- *
  * From Akamai's counting perspective, the outer document brace is level 1,
  * `node {}` is level 2, then each `child {}` adds one more — so depth=19
  * puts the leaf at level 21, exceeding Akamai's default of 20.
  */
-function buildDeepQuery(id: string, depth: number, delayMs?: number): string {
-  const args = delayMs ? `id: "${id}", delay: ${delayMs}` : `id: "${id}"`;
+function buildDeepQuery(id: string, depth: number): string {
   let inner = "id name level";
   for (let i = 0; i < depth; i++) {
     inner = `child {\n${inner}\n}`;
   }
-  return `{ node(${args}) {\n${inner}\n} }`;
+  return `{ node(id: "${id}") {\n${inner}\n} }`;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,12 +78,9 @@ describe("Nesting depth — shallow (within Akamai limits)", () => {
 // ---------------------------------------------------------------------------
 describe("Nesting depth — exceeds Akamai's 20-level default", () => {
   it("caches a 21-level query — Akamai would bypass this entirely", async () => {
-    // depth=19 child selections puts the leaf at nesting level 21
-    // (1 outer brace + 1 node + 19 child = 21)
-    const depth = 19;
+    const depth = 19; // 1 outer + 1 node + 19 child = 21 levels
     const query = buildDeepQuery("depth-21", depth);
 
-    // Confirm the query is genuinely 21 levels deep
     const actualDepth = (query.match(/\{/g) ?? []).length;
     expect(actualDepth).to.be.greaterThan(20);
 
@@ -101,11 +90,7 @@ describe("Nesting depth — exceeds Akamai's 20-level default", () => {
     const body = await r1.json();
     expect(body.data?.node).to.exist;
     expect(body.errors).to.be.undefined;
-
-    expect(r1.headers.get("x-cache")).to.equal(
-      "MISS",
-      "first request is a cache miss"
-    );
+    expect(r1.headers.get("x-cache")).to.equal("MISS");
 
     const r2 = await gql(query);
     expect(r2.status).to.equal(200);
@@ -114,11 +99,8 @@ describe("Nesting depth — exceeds Akamai's 20-level default", () => {
       "second request hits the cache — impossible on Akamai past 20 levels"
     );
 
-    // Verify the cached body is correct and deep
+    // Walk down to the deepest child and verify it resolved correctly
     const cachedBody = await r2.json();
-    expect(cachedBody.data?.node?.level).to.equal(0);
-
-    // Walk down to the deepest child and verify it resolved
     let cursor = cachedBody.data.node;
     for (let i = 0; i < depth; i++) {
       expect(cursor.child, `child should exist at depth ${i + 1}`).to.exist;
@@ -127,7 +109,7 @@ describe("Nesting depth — exceeds Akamai's 20-level default", () => {
     expect(cursor.level).to.equal(depth);
   });
 
-  it("caches a 25-level query — well beyond Akamai's default, near its max", async () => {
+  it("caches a 25-level query — well beyond Akamai's default", async () => {
     const depth = 23; // leaf lands at level 25
     const query = buildDeepQuery("depth-25", depth);
 
@@ -141,9 +123,7 @@ describe("Nesting depth — exceeds Akamai's 20-level default", () => {
 
     const cachedBody = await r2.json();
     let cursor = cachedBody.data.node;
-    for (let i = 0; i < depth; i++) {
-      cursor = cursor.child;
-    }
+    for (let i = 0; i < depth; i++) cursor = cursor.child;
     expect(cursor.level).to.equal(depth);
   });
 });
@@ -163,17 +143,10 @@ describe("Nesting depth — near Akamai's configurable maximum of 100", () => {
 
     const r2 = await gql(query);
     expect(r2.status).to.equal(200);
-    expect(r2.headers.get("x-cache")).to.equal(
-      "HIT",
-      "50-level query is cached — Akamai would require custom config to even parse this, " +
-        "and would still fail at its 100-level hard cap"
-    );
+    expect(r2.headers.get("x-cache")).to.equal("HIT");
 
-    // Verify cache key is stable: different formatting, same structure → same key
-    const queryVerbose = buildDeepQuery("depth-50", depth).replace(
-      /\n/g,
-      "\n  "
-    );
+    // Verify normalization still works at this depth
+    const queryVerbose = buildDeepQuery("depth-50", depth).replace(/\n/g, "\n  ");
     const r3 = await gql(queryVerbose);
     expect(r3.headers.get("x-cache-key")).to.equal(
       r2.headers.get("x-cache-key"),
@@ -183,8 +156,7 @@ describe("Nesting depth — near Akamai's configurable maximum of 100", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Normalization works at depth
-// Same deep query, different whitespace → same cache key
+// Normalization holds at depth
 // ---------------------------------------------------------------------------
 describe("Normalization holds at nesting depth", () => {
   it("normalizes a 21-level query across whitespace variants", async () => {
@@ -198,56 +170,42 @@ describe("Normalization holds at nesting depth", () => {
     const r2 = await gql(verbose);
     expect(r2.headers.get("x-cache")).to.equal("HIT");
 
-    expect(r1.headers.get("x-cache-key")).to.equal(
-      r2.headers.get("x-cache-key"),
-      "cache key is the same regardless of whitespace"
-    );
+    expect(r1.headers.get("x-cache-key")).to.equal(r2.headers.get("x-cache-key"));
   });
 });
 
 // ---------------------------------------------------------------------------
-// Latency: cache hit vs simulated slow origin
-//
-// The mock handler sleeps for `delay` ms before responding, simulating a
-// slow backend. Cache HITs are served by the caching policy before the
-// request ever reaches the handler, so they are not affected by the delay.
+// Latency: every miss pays the 1s origin delay; hits do not
 // ---------------------------------------------------------------------------
 describe("Latency savings — cache hit vs slow origin", () => {
-  it(`MISS takes ≥${SIMULATED_DELAY_MS}ms; HIT is served in well under that`, async () => {
-    const query = buildDeepQuery("latency-test", 5, SIMULATED_DELAY_MS);
+  it(`MISS takes ≥${ORIGIN_DELAY_MS}ms; HIT is served in well under that`, async () => {
+    const query = buildDeepQuery("latency-shallow", 5);
 
     const { response: r1, elapsed: missTime } = await timedGql(query);
     expect(r1.status).to.equal(200);
     expect(r1.headers.get("x-cache")).to.equal("MISS");
-    expect(missTime).to.be.at.least(
-      SIMULATED_DELAY_MS,
-      `cache miss should take at least ${SIMULATED_DELAY_MS}ms (origin delay)`
-    );
+    expect(missTime).to.be.at.least(ORIGIN_DELAY_MS);
 
     const { response: r2, elapsed: hitTime } = await timedGql(query);
     expect(r2.status).to.equal(200);
     expect(r2.headers.get("x-cache")).to.equal("HIT");
-    expect(hitTime).to.be.lessThan(
-      SIMULATED_DELAY_MS / 2,
-      "cache hit should be served in well under the origin delay"
-    );
+    expect(hitTime).to.be.lessThan(ORIGIN_DELAY_MS / 2);
 
     console.log(`  MISS: ${missTime}ms | HIT: ${hitTime}ms | speedup: ${Math.round(missTime / hitTime)}x`);
   });
 
-  it("latency saving holds on a deep (21-level) query with slow origin", async () => {
-    const depth = 19;
-    const query = buildDeepQuery("latency-deep", depth, SIMULATED_DELAY_MS);
+  it("latency saving holds on a 21-level query (beyond Akamai's limit)", async () => {
+    const query = buildDeepQuery("latency-deep", 19);
 
     const { response: r1, elapsed: missTime } = await timedGql(query);
     expect(r1.status).to.equal(200);
     expect(r1.headers.get("x-cache")).to.equal("MISS");
-    expect(missTime).to.be.at.least(SIMULATED_DELAY_MS);
+    expect(missTime).to.be.at.least(ORIGIN_DELAY_MS);
 
     const { response: r2, elapsed: hitTime } = await timedGql(query);
     expect(r2.status).to.equal(200);
     expect(r2.headers.get("x-cache")).to.equal("HIT");
-    expect(hitTime).to.be.lessThan(SIMULATED_DELAY_MS / 2);
+    expect(hitTime).to.be.lessThan(ORIGIN_DELAY_MS / 2);
 
     console.log(`  MISS: ${missTime}ms | HIT: ${hitTime}ms | speedup: ${Math.round(missTime / hitTime)}x`);
   });

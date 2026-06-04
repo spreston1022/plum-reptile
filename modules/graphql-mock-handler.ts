@@ -5,22 +5,22 @@ import { buildSchema, graphql } from "graphql";
  * Self-contained GraphQL backend with a recursive Node type.
  *
  * Schema:
- *   type Query  { node(id, delay): Node }
- *   type Node   { id, name, level, child, children(count) }
+ *   type Node { id, name, level, child: Node, children(count): [Node] }
  *
- * delay: optional milliseconds the handler sleeps before responding.
- * Use this to simulate a slow origin and make cache hit latency savings visible.
- * The delay only applies on cache misses — hits are served by the cache policy
- * before the request ever reaches this handler.
+ * Every request sleeps for ORIGIN_DELAY_MS before responding, simulating a
+ * slow backend. Cache HITs are served by the inbound policy before reaching
+ * this handler, so they are unaffected by the delay — making the latency
+ * difference between a HIT and a MISS immediately visible.
  *
- * Nesting: each child field is a thunk, so the executor only evaluates as many
- * levels as the query selects. No server-side depth limit — useful for testing
- * beyond Akamai's 20-level default.
+ * Nesting: each child field is a thunk, so the executor only evaluates as
+ * many levels as the query selects. No server-side depth limit.
  */
+
+const ORIGIN_DELAY_MS = 1000;
 
 const schema = buildSchema(`
   type Query {
-    node(id: ID!, delay: Int): Node
+    node(id: ID!): Node
   }
 
   type Node {
@@ -45,20 +45,14 @@ function makeNode(id: string, level: number): NodeShape {
     id,
     name: `${id}@L${level}`,
     level,
-    // Thunks so the executor only evaluates levels the query selects
     child: () => makeNode(`${id}.c`, level + 1),
     children: ({ count = 3 }: { count?: number }) =>
       Array.from({ length: count }, (_, i) => makeNode(`${id}.${i}`, level + 1)),
   };
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const rootValue = {
-  node: async ({ id, delay }: { id: string; delay?: number }) => {
-    if (delay && delay > 0) await sleep(Math.min(delay, 5000));
-    return makeNode(id, 0);
-  },
+  node: ({ id }: { id: string }) => makeNode(id, 0),
 };
 
 export default async function graphqlMockHandler(
@@ -81,6 +75,10 @@ export default async function graphqlMockHandler(
   if (!query) {
     return respond({ errors: [{ message: "Missing 'query' field" }] }, 400);
   }
+
+  // Simulate a slow origin — every cache miss pays this cost.
+  // Cache hits never reach this handler.
+  await new Promise((resolve) => setTimeout(resolve, ORIGIN_DELAY_MS));
 
   const result = await graphql({
     schema,
