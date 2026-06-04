@@ -51,11 +51,12 @@ describe("Basic caching", () => {
 // ---------------------------------------------------------------------------
 describe("Akamai gap: 4096-byte query size limit", () => {
   it("caches a query that exceeds 4096 bytes — Akamai would bypass this entirely", async () => {
-    // Build a query requesting 60 characters with full field sets.
-    // Each alias line is ~83 bytes; 60 lines ≈ 5000 bytes.
+    // Build a query requesting 60 characters with full scalar field sets.
+    // Each alias line is ~79 bytes; 60 lines ≈ 4800 bytes.
+    // (Rick and Morty Character fields: id name status species type gender image created)
     const aliases = Array.from({ length: 60 }, (_, i) => {
       const id = i + 10; // double-digit IDs keep byte count consistent
-      return `  c${id}: character(id: "${id}") { id name status species type gender image url created }`;
+      return `  c${id}: character(id: "${id}") { id name status species type gender image created }`;
     });
     const largeQuery = `{\n${aliases.join("\n")}\n}`;
 
