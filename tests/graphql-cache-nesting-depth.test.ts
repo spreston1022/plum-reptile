@@ -1,8 +1,12 @@
 /**
- * Nesting depth tests against the /graphql-mock endpoint.
+ * Nesting depth + latency tests against the /graphql-mock endpoint.
  *
  * The mock backend uses a recursive Node type with no server-side depth limit,
  * so we can push nesting as deep as we like and observe cache behavior.
+ *
+ * The `delay` argument on the `node` query makes the handler sleep before
+ * responding, simulating a slow origin. Cache HITs are served by the policy
+ * before the request reaches the handler, so they are unaffected by the delay.
  *
  * Akamai's default: 20 levels. Configurable max: 100 levels.
  * Queries that exceed these limits have GraphQL analysis skipped entirely —
@@ -21,12 +25,21 @@ import { expect } from "chai";
 
 const ENDPOINT = `${TestHelper.TEST_URL}/graphql-mock`;
 
+const SIMULATED_DELAY_MS = 1000;
+
 async function gql(query: string, variables?: Record<string, unknown>) {
   return fetch(ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
   });
+}
+
+async function timedGql(query: string, variables?: Record<string, unknown>) {
+  const start = Date.now();
+  const response = await gql(query, variables);
+  const elapsed = Date.now() - start;
+  return { response, elapsed };
 }
 
 /**
@@ -39,12 +52,13 @@ async function gql(query: string, variables?: Record<string, unknown>) {
  * `node {}` is level 2, then each `child {}` adds one more — so depth=19
  * puts the leaf at level 21, exceeding Akamai's default of 20.
  */
-function buildDeepQuery(id: string, depth: number): string {
+function buildDeepQuery(id: string, depth: number, delayMs?: number): string {
+  const args = delayMs ? `id: "${id}", delay: ${delayMs}` : `id: "${id}"`;
   let inner = "id name level";
   for (let i = 0; i < depth; i++) {
     inner = `child {\n${inner}\n}`;
   }
-  return `{ node(id: "${id}") {\n${inner}\n} }`;
+  return `{ node(${args}) {\n${inner}\n} }`;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,5 +202,53 @@ describe("Normalization holds at nesting depth", () => {
       r2.headers.get("x-cache-key"),
       "cache key is the same regardless of whitespace"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Latency: cache hit vs simulated slow origin
+//
+// The mock handler sleeps for `delay` ms before responding, simulating a
+// slow backend. Cache HITs are served by the caching policy before the
+// request ever reaches the handler, so they are not affected by the delay.
+// ---------------------------------------------------------------------------
+describe("Latency savings — cache hit vs slow origin", () => {
+  it(`MISS takes ≥${SIMULATED_DELAY_MS}ms; HIT is served in well under that`, async () => {
+    const query = buildDeepQuery("latency-test", 5, SIMULATED_DELAY_MS);
+
+    const { response: r1, elapsed: missTime } = await timedGql(query);
+    expect(r1.status).to.equal(200);
+    expect(r1.headers.get("x-cache")).to.equal("MISS");
+    expect(missTime).to.be.at.least(
+      SIMULATED_DELAY_MS,
+      `cache miss should take at least ${SIMULATED_DELAY_MS}ms (origin delay)`
+    );
+
+    const { response: r2, elapsed: hitTime } = await timedGql(query);
+    expect(r2.status).to.equal(200);
+    expect(r2.headers.get("x-cache")).to.equal("HIT");
+    expect(hitTime).to.be.lessThan(
+      SIMULATED_DELAY_MS / 2,
+      "cache hit should be served in well under the origin delay"
+    );
+
+    console.log(`  MISS: ${missTime}ms | HIT: ${hitTime}ms | speedup: ${Math.round(missTime / hitTime)}x`);
+  });
+
+  it("latency saving holds on a deep (21-level) query with slow origin", async () => {
+    const depth = 19;
+    const query = buildDeepQuery("latency-deep", depth, SIMULATED_DELAY_MS);
+
+    const { response: r1, elapsed: missTime } = await timedGql(query);
+    expect(r1.status).to.equal(200);
+    expect(r1.headers.get("x-cache")).to.equal("MISS");
+    expect(missTime).to.be.at.least(SIMULATED_DELAY_MS);
+
+    const { response: r2, elapsed: hitTime } = await timedGql(query);
+    expect(r2.status).to.equal(200);
+    expect(r2.headers.get("x-cache")).to.equal("HIT");
+    expect(hitTime).to.be.lessThan(SIMULATED_DELAY_MS / 2);
+
+    console.log(`  MISS: ${missTime}ms | HIT: ${hitTime}ms | speedup: ${Math.round(missTime / hitTime)}x`);
   });
 });

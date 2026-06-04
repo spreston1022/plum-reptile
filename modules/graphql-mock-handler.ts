@@ -5,17 +5,22 @@ import { buildSchema, graphql } from "graphql";
  * Self-contained GraphQL backend with a recursive Node type.
  *
  * Schema:
- *   type Node { id, name, level, child: Node, children(count): [Node] }
+ *   type Query  { node(id, delay): Node }
+ *   type Node   { id, name, level, child, children(count) }
  *
- * Because each resolver returns a thunk for `child`, the GraphQL executor
- * only evaluates as many levels as the query actually selects — meaning
- * this backend supports arbitrary nesting depth with no server-side limit.
- * That makes it the right tool for testing Akamai's 20-level cap.
+ * delay: optional milliseconds the handler sleeps before responding.
+ * Use this to simulate a slow origin and make cache hit latency savings visible.
+ * The delay only applies on cache misses — hits are served by the cache policy
+ * before the request ever reaches this handler.
+ *
+ * Nesting: each child field is a thunk, so the executor only evaluates as many
+ * levels as the query selects. No server-side depth limit — useful for testing
+ * beyond Akamai's 20-level default.
  */
 
 const schema = buildSchema(`
   type Query {
-    node(id: ID!): Node
+    node(id: ID!, delay: Int): Node
   }
 
   type Node {
@@ -47,8 +52,13 @@ function makeNode(id: string, level: number): NodeShape {
   };
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const rootValue = {
-  node: ({ id }: { id: string }) => makeNode(id, 0),
+  node: async ({ id, delay }: { id: string; delay?: number }) => {
+    if (delay && delay > 0) await sleep(Math.min(delay, 5000));
+    return makeNode(id, 0);
+  },
 };
 
 export default async function graphqlMockHandler(
